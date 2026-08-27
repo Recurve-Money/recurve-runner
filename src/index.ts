@@ -2,15 +2,63 @@
  * Recurve fund runner. Manages the propose -> veto window -> execute -> settle
  * lifecycle for one fund, on a schedule (see the bottom of this file).
  *
- * WHAT WORKS RIGHT NOW: everything in `runOnce()` except `decideNextMove()`.
- * The lifecycle management (propose, wait, check state, execute, settle) is
- * real and uses the real SDK. What it proposes is not filled in yet, because
- * that needs a Uniswap V3 SwapRouter + QuoterV2 address on testnet (46630)
- * that we have not confirmed exists. See decideNextMove() below.
+ * decideNextMove() proposes swapping all idle float into $RECURVE through
+ * PortfolioStrategy, quoted live off our own testnet Uniswap V3 pool
+ * (recurve-dex). It is deliberately a single fixed trade, not a real
+ * strategy: there is a WETH/$RECURVE pool and nothing else, so "the
+ * strategy" is entirely about proving propose -> veto -> watcher -> execute
+ * -> settle moves real funds, not about a trading edge.
  */
-import {createPublicClient, createWalletClient, http, defineChain, type Hex} from "viem";
+import {createPublicClient, createWalletClient, http, defineChain, encodeFunctionData, type Hex} from "viem";
 import {privateKeyToAccount} from "viem/accounts";
 import {Recurve, ProposalState} from "@recurvemoney/sdk";
+
+const RECURVE_STRATEGY = requireEnv("RECURVE_STRATEGY") as Hex;
+const RECURVE_TOKEN = requireEnv("RECURVE_TOKEN") as Hex;
+const DEX_QUOTER = requireEnv("DEX_QUOTER") as Hex;
+const POOL_FEE = 3000; // the fee tier the seeded WETH/RECURVE pool actually uses
+const MAX_SLIPPAGE_BPS = 300n; // 3%, matching the strategy's own configured max
+
+const quoterAbi = [
+  {
+    type: "function",
+    name: "quoteExactInputSingle",
+    stateMutability: "nonpayable", // QuoterV2 reverts internally to compute the quote -- called via simulate, never sent as a real tx
+    inputs: [
+      {
+        type: "tuple",
+        components: [
+          {name: "tokenIn", type: "address"},
+          {name: "tokenOut", type: "address"},
+          {name: "amountIn", type: "uint256"},
+          {name: "fee", type: "uint24"},
+          {name: "sqrtPriceLimitX96", type: "uint160"},
+        ],
+      },
+    ],
+    outputs: [
+      {name: "amountOut", type: "uint256"},
+      {name: "sqrtPriceX96After", type: "uint160"},
+      {name: "initializedTicksCrossed", type: "uint32"},
+      {name: "gasEstimate", type: "uint256"},
+    ],
+  },
+] as const;
+
+const strategyAbi = [
+  {
+    type: "function",
+    name: "buy",
+    inputs: [
+      {name: "token", type: "address"},
+      {name: "amountIn", type: "uint256"},
+      {name: "minAmountOut", type: "uint256"},
+      {name: "quotedOut", type: "uint256"},
+    ],
+    outputs: [],
+    stateMutability: "nonpayable",
+  },
+] as const;
 
 const robinhoodTestnet = defineChain({
   id: 46630,
@@ -46,24 +94,40 @@ function sleep(ms: number): Promise<void> {
 }
 
 /**
- * TODO(blocked): decide what to propose next.
- *
- * This is where a real strategy call gets built — e.g. a PortfolioStrategy
- * `buy(token, amountIn, minAmountOut, quotedOut)`. It is not implemented
- * because:
- *
- *   1. No PortfolioStrategy is deployed for this vault yet.
- *   2. Building `buy`'s calldata safely needs a live quote from Uniswap's
- *      QuoterV2, and we have not confirmed a Uniswap V3 deployment exists
- *      on chain 46630 at all (only mainnet, 4663, is documented).
- *
- * Returning `null` here means "nothing to propose this round" -- the runner
- * below treats that as a no-op, not an error, so it is safe to deploy and
- * run on a schedule before this is filled in. It just will not do anything
- * yet.
+ * If there is idle float sitting in the vault, propose swapping all of it
+ * into $RECURVE through PortfolioStrategy. Quotes the swap live off the
+ * seeded WETH/$RECURVE pool first, so `minAmountOut` reflects the pool's
+ * actual price rather than a guess -- the same protection a human trader
+ * gets from a DEX front-end's slippage setting, just computed here instead.
  */
 async function decideNextMove(): Promise<{target: Hex; assets: bigint; callData: Hex} | null> {
-  return null;
+  const snap = await recurve.vault.snapshot();
+  if (snap.float <= 0n) return null;
+
+  const [quotedOut] = await publicClient.simulateContract({
+    address: DEX_QUOTER,
+    abi: quoterAbi,
+    functionName: "quoteExactInputSingle",
+    args: [
+      {
+        tokenIn: requireEnv("VAULT_ASSET") as Hex, // WETH
+        tokenOut: RECURVE_TOKEN,
+        amountIn: snap.float,
+        fee: POOL_FEE,
+        sqrtPriceLimitX96: 0n,
+      },
+    ],
+  }).then((r) => r.result);
+
+  const minAmountOut = (quotedOut * (10_000n - MAX_SLIPPAGE_BPS)) / 10_000n;
+
+  const callData = encodeFunctionData({
+    abi: strategyAbi,
+    functionName: "buy",
+    args: [RECURVE_TOKEN, snap.float, minAmountOut, quotedOut],
+  });
+
+  return {target: RECURVE_STRATEGY, assets: snap.float, callData};
 }
 
 async function runOnce(): Promise<void> {

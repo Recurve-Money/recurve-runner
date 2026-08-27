@@ -3,18 +3,21 @@
 Scheduled agent for one Recurve fund. Manages propose -> veto window -> execute
 -> settle on an interval.
 
-## Status: lifecycle works, strategy does not yet
+## Status: proposes a real trade now
 
-`decideNextMove()` in `src/index.ts` currently returns `null` always, so the
-runner deploys, connects, reads the vault, and logs -- but never proposes
-anything. That is intentional, not a bug: proposing a real trade needs
-`PortfolioStrategy` deployed for this vault, which needs a Uniswap V3
-SwapRouter + QuoterV2 address on Robinhood Chain testnet (46630), which is not
-yet confirmed to exist (only the mainnet, 4663, deployment is documented).
+`decideNextMove()` swaps all idle vault float into $RECURVE through
+`PortfolioStrategy`, quoted live off the seeded WETH/$RECURVE pool on our own
+testnet Uniswap V3 deployment ([recurve-dex](https://github.com/Recurve-Money/recurve-dex),
+since none is officially documented on chain 46630). This is a single fixed
+trade, not a real strategy -- there is exactly one pool to trade into. The
+point right now is proving the lifecycle moves real funds, not finding an
+edge.
 
-Everything else -- reading the vault snapshot, proposing, waiting out the real
-veto window, checking proposal state, executing -- is real and uses
-`@recurvemoney/sdk`.
+`settle()` is still not called after `execute()` -- the strategy needs to sell
+back to the base asset first, and that flow hasn't been wired up yet.
+
+Needs a deposit in the vault before it has anything to propose -- `float`
+gates `decideNextMove()`, and the vault starts at 0.
 
 ## Env vars
 
@@ -24,6 +27,10 @@ veto window, checking proposal state, executing -- is real and uses
 | `RECURVE_VAULT` | The vault this runner operates |
 | `RECURVE_GOVERNOR` | Its governor |
 | `RECURVE_REGISTRY` | Watcher registry |
+| `RECURVE_STRATEGY` | The fund's `PortfolioStrategy` |
+| `RECURVE_TOKEN` | `$RECURVE` -- what the strategy buys |
+| `VAULT_ASSET` | WETH -- the vault's base asset |
+| `DEX_QUOTER` | QuoterV2 on our testnet Uniswap deployment |
 | `PRIVATE_KEY` | The agent key registered on the governor |
 | `RUNNER_INTERVAL_MS` | Optional, defaults to once/day |
 
@@ -31,3 +38,4 @@ veto window, checking proposal state, executing -- is real and uses
 
 Same pattern as recurve-api: push to `main`, Railway rebuilds from
 `railway.json`.
+
