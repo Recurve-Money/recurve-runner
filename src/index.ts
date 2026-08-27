@@ -18,12 +18,14 @@ const PROPOSAL_POSTED_EVENT = parseAbiItem(
 );
 
 /**
- * The contract itself does not block overlapping proposals -- propose()
+ * The contract itself does not track "the" current proposal -- propose()
  * happily accepts a second one while the first is still Pending. Scanning
  * for the most recent ProposalPosted event and checking its live state is
- * the runner's own guard against proposing on top of itself every interval.
+ * how the runner knows whether something is already in flight, and its ID
+ * if so, so a restart mid-veto-window doesn't either re-propose from
+ * scratch or forget to ever execute what's already posted.
  */
-async function hasPendingProposal(governor: Hex): Promise<boolean> {
+async function findPendingProposal(governor: Hex): Promise<Hex | null> {
   const latestBlock = await publicClient.getBlockNumber();
   const deployBlock = BigInt(process.env.RECURVE_DEPLOY_BLOCK ?? "0");
   const logs = await publicClient.getLogs({
@@ -32,12 +34,12 @@ async function hasPendingProposal(governor: Hex): Promise<boolean> {
     fromBlock: deployBlock,
     toBlock: latestBlock,
   });
-  if (logs.length === 0) return false;
+  if (logs.length === 0) return null;
 
   const mostRecent = logs[logs.length - 1]!;
   const id = mostRecent.args.proposalId!;
   const proposal = await recurve.agent.proposal(id);
-  return proposal.state === ProposalState.Pending;
+  return proposal.state === ProposalState.Pending ? id : null;
 }
 
 const RECURVE_STRATEGY = requireEnv("RECURVE_STRATEGY") as Hex;
@@ -162,8 +164,21 @@ async function runOnce(): Promise<void> {
   const snap = await recurve.vault.snapshot();
   console.log(`[runner] float=${snap.float} deployed=${snap.deployedAssets} sharePrice=${snap.sharePrice}`);
 
-  if (await hasPendingProposal(RECURVE_GOVERNOR)) {
-    console.log("[runner] a proposal is already pending -- not proposing another on top of it");
+  const pendingId = await findPendingProposal(RECURVE_GOVERNOR);
+
+  if (pendingId) {
+    const waitSeconds = await recurve.agent.secondsUntilExecutable(pendingId);
+    if (waitSeconds > 0) {
+      console.log(`[runner] ${pendingId} is pending, ${waitSeconds}s left in its veto window -- checking again next interval`);
+      return;
+    }
+
+    console.log(`[runner] ${pendingId}'s veto window has closed -- executing`);
+    await recurve.agent.execute(pendingId);
+    // A real strategy settles what it actually returned; a real implementation
+    // reads that off the strategy's return value or a follow-up read, not a
+    // hardcoded number. Left unresolved for the same reason as decideNextMove.
+    console.log(`[runner] executed ${pendingId} -- settle() intentionally not called; see decideNextMove() TODO`);
     return;
   }
 
@@ -175,24 +190,7 @@ async function runOnce(): Promise<void> {
 
   console.log(`[runner] proposing target=${move.target} assets=${move.assets}`);
   const id = await recurve.agent.propose(move.target, move.assets, move.callData);
-  console.log(`[runner] proposed ${id}, waiting out the veto window`);
-
-  const waitSeconds = await recurve.agent.secondsUntilExecutable(id);
-  if (waitSeconds > 0) await sleep((waitSeconds + 5) * 1000); // +5s buffer past the boundary
-
-  const proposal = await recurve.agent.proposal(id);
-  if (proposal.state !== ProposalState.Pending) {
-    console.log(`[runner] ${id} is ${ProposalState[proposal.state]}, not Pending -- not executing`);
-    return;
-  }
-
-  console.log(`[runner] executing ${id}`);
-  await recurve.agent.execute(id);
-
-  // A real strategy settles what it actually returned; a real implementation
-  // reads that off the strategy's return value or a follow-up read, not a
-  // hardcoded number. Left unresolved for the same reason as decideNextMove.
-  console.log(`[runner] executed ${id} -- settle() intentionally not called; see decideNextMove() TODO`);
+  console.log(`[runner] proposed ${id} -- will execute once its veto window closes`);
 }
 
 const INTERVAL_MS = Number(process.env.RUNNER_INTERVAL_MS ?? 24 * 60 * 60 * 1000); // default: once/day
