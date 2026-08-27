@@ -91,8 +91,8 @@ const strategyAbi = [
 ] as const;
 
 const robinhoodTestnet = defineChain({
-  id: 46630,
-  name: "Robinhood Chain Testnet",
+  id: Number(process.env.RECURVE_CHAIN_ID ?? "46630"),
+  name: "Robinhood Chain",
   nativeCurrency: {name: "Ether", symbol: "ETH", decimals: 18},
   rpcUrls: {default: {http: [requireEnv("RECURVE_RPC_URL")]}},
 });
