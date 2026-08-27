@@ -9,12 +9,40 @@
  * strategy" is entirely about proving propose -> veto -> watcher -> execute
  * -> settle moves real funds, not about a trading edge.
  */
-import {createPublicClient, createWalletClient, http, defineChain, encodeFunctionData, type Hex} from "viem";
+import {createPublicClient, createWalletClient, http, defineChain, encodeFunctionData, parseAbiItem, type Hex} from "viem";
 import {privateKeyToAccount} from "viem/accounts";
 import {Recurve, ProposalState} from "@recurvemoney/sdk";
 
+const PROPOSAL_POSTED_EVENT = parseAbiItem(
+  "event ProposalPosted(bytes32 indexed proposalId, address indexed target, uint256 assets, uint256 executableAt)"
+);
+
+/**
+ * The contract itself does not block overlapping proposals -- propose()
+ * happily accepts a second one while the first is still Pending. Scanning
+ * for the most recent ProposalPosted event and checking its live state is
+ * the runner's own guard against proposing on top of itself every interval.
+ */
+async function hasPendingProposal(governor: Hex): Promise<boolean> {
+  const latestBlock = await publicClient.getBlockNumber();
+  const deployBlock = BigInt(process.env.RECURVE_DEPLOY_BLOCK ?? "0");
+  const logs = await publicClient.getLogs({
+    address: governor,
+    event: PROPOSAL_POSTED_EVENT,
+    fromBlock: deployBlock,
+    toBlock: latestBlock,
+  });
+  if (logs.length === 0) return false;
+
+  const mostRecent = logs[logs.length - 1]!;
+  const id = mostRecent.args.proposalId!;
+  const proposal = await recurve.agent.proposal(id);
+  return proposal.state === ProposalState.Pending;
+}
+
 const RECURVE_STRATEGY = requireEnv("RECURVE_STRATEGY") as Hex;
 const RECURVE_TOKEN = requireEnv("RECURVE_TOKEN") as Hex;
+const RECURVE_GOVERNOR = requireEnv("RECURVE_GOVERNOR") as Hex;
 const DEX_QUOTER = requireEnv("DEX_QUOTER") as Hex;
 const POOL_FEE = 3000; // the fee tier the seeded WETH/RECURVE pool actually uses
 const MAX_SLIPPAGE_BPS = 300n; // 3%, matching the strategy's own configured max
@@ -83,7 +111,7 @@ const recurve = new Recurve({
   walletClient,
   addresses: {
     vault: requireEnv("RECURVE_VAULT") as Hex,
-    governor: requireEnv("RECURVE_GOVERNOR") as Hex,
+    governor: RECURVE_GOVERNOR,
     registry: requireEnv("RECURVE_REGISTRY") as Hex,
   },
 });
@@ -133,6 +161,11 @@ async function decideNextMove(): Promise<{target: Hex; assets: bigint; callData:
 async function runOnce(): Promise<void> {
   const snap = await recurve.vault.snapshot();
   console.log(`[runner] float=${snap.float} deployed=${snap.deployedAssets} sharePrice=${snap.sharePrice}`);
+
+  if (await hasPendingProposal(RECURVE_GOVERNOR)) {
+    console.log("[runner] a proposal is already pending -- not proposing another on top of it");
+    return;
+  }
 
   const move = await decideNextMove();
   if (!move) {

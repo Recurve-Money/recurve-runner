@@ -28,6 +28,7 @@ gates `decideNextMove()`, and the vault starts at 0.
 | `RECURVE_GOVERNOR` | Its governor |
 | `RECURVE_REGISTRY` | Watcher registry |
 | `RECURVE_STRATEGY` | The fund's `PortfolioStrategy` |
+| `RECURVE_DEPLOY_BLOCK` | Optional, defaults to `0`. Block the governor was deployed at — bounds the scan `hasPendingProposal()` does on every round; without it, the scan starts from genesis and gets slower as the chain grows |
 | `RECURVE_TOKEN` | `$RECURVE` -- what the strategy buys |
 | `VAULT_ASSET` | WETH -- the vault's base asset |
 | `DEX_QUOTER` | QuoterV2 on our testnet Uniswap deployment |
