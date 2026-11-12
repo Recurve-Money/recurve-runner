@@ -79,6 +79,22 @@ export function currentFunding(
   return null;
 }
 
+/** One change to the exit queue, as the vault's events report it. */
+export type ExitEvent = {kind: "queued"; requestId: bigint; shares: bigint} | {kind: "claimed"; requestId: bigint};
+
+/** Keeps `queue` (request id to shares still waiting) in step with one event. */
+export function applyExit(queue: Map<bigint, bigint>, event: ExitEvent): void {
+  if (event.kind === "queued") queue.set(event.requestId, event.shares);
+  else queue.delete(event.requestId);
+}
+
+/** Shares the queue is still waiting to redeem. */
+export function waitingShares(queue: ReadonlyMap<bigint, bigint>): bigint {
+  let total = 0n;
+  for (const shares of queue.values()) total += shares;
+  return total;
+}
+
 /** Whether a sell has executed since the funding: the leg has been sold this cycle. */
 export function soldSince(history: readonly ProposalRecord[], fundingBlock: bigint): boolean {
   return history.some((p) => p.kind === "sell" && p.executedBlock !== null && p.executedBlock > fundingBlock);

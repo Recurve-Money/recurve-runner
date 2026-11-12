@@ -1,7 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {ProposalState} from "@recurvemoney/sdk";
 import {encodeBuy, encodeReturn, encodeSell} from "./trade.js";
-import {currentFunding, newestPending, proposalKind, returnedSince, soldSince, type ProposalRecord} from "./select.js";
+import {applyExit, currentFunding, newestPending, proposalKind, returnedSince, soldSince, waitingShares, type ProposalRecord} from "./select.js";
 
 const id = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
 
@@ -78,6 +78,23 @@ describe("currentFunding", () => {
       rec({n: 3, assets: 30n}),
     ];
     expect(currentFunding(list)).toBeNull();
+  });
+});
+
+describe("the exit queue", () => {
+  it("counts a request from when it is queued until it is claimed", () => {
+    const queue = new Map<bigint, bigint>();
+    applyExit(queue, {kind: "queued", requestId: 0n, shares: 10n});
+    applyExit(queue, {kind: "queued", requestId: 1n, shares: 5n});
+    expect(waitingShares(queue)).toBe(15n);
+    applyExit(queue, {kind: "claimed", requestId: 0n});
+    expect(waitingShares(queue)).toBe(5n);
+  });
+
+  it("is empty before anything is queued, and a claim it never saw queued changes nothing", () => {
+    const queue = new Map<bigint, bigint>();
+    applyExit(queue, {kind: "claimed", requestId: 7n});
+    expect(waitingShares(queue)).toBe(0n);
   });
 });
 

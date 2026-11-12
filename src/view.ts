@@ -1,9 +1,17 @@
 import {ContractFunctionExecutionError, type Hex} from "viem";
-import {erc20Abi, governorExtraAbi, liquidatedEvent, proposalExecutedEvent, proposalPostedEvent, vaultQueueAbi} from "./abi.js";
+import {
+  erc20Abi,
+  governorExtraAbi,
+  liquidatedEvent,
+  proposalExecutedEvent,
+  proposalPostedEvent,
+  vaultQueueAbi,
+  withdrawalClaimedEvent,
+  withdrawalQueuedEvent,
+} from "./abi.js";
 import type {Context} from "./context.js";
 import type {FundView} from "./policy.js";
-import {currentFunding, newestPending, proposalKind, returnedSince, soldSince, type ProposalRecord} from "./select.js";
-import {unclaimedShares} from "./trade.js";
+import {applyExit, currentFunding, newestPending, proposalKind, returnedSince, soldSince, waitingShares, type ProposalRecord} from "./select.js";
 
 /**
  * Reads the chain into a `FundView` for the policy. The governor's proposal
@@ -13,14 +21,12 @@ import {unclaimedShares} from "./trade.js";
 
 const FINAL = new Set([2, 3, 5]); // Vetoed, Blocked, Settled: never change again
 
-/** Queue entries read per call, and how long a queue is still read entry by entry. */
-const QUEUE_PAGE = 500;
-const QUEUE_READ_LIMIT = 20_000n;
-
 export class ChainView {
   private history: ProposalRecord[] = [];
   /** Every `Liquidated` the strategy has emitted: what each `returnToVault` sent back. */
   private liquidated: {blockNumber: bigint; amount: bigint}[] = [];
+  /** Queued exits not yet claimed: request id to shares. */
+  private queue = new Map<bigint, bigint>();
   private scannedTo: bigint | null = null;
   /** Proposals whose window closed with execute() reverting. Reported once, then skipped. */
   private abandoned = new Set<Hex>();
@@ -80,26 +86,24 @@ export class ChainView {
 
   // ---------------------------------------------------------------- history
 
+  /**
+   * Reads the logs since the last round, in steps the RPC will answer. A step
+   * is kept whole or not at all, and a step that was kept is never read again:
+   * everything it needs from the chain is fetched first, and only then is any
+   * of it added. A step added twice would count a return twice, and settle
+   * would book the sum.
+   */
   private async extendHistory(latest: bigint): Promise<void> {
     const {publicClient, cfg} = this.ctx;
     const from = this.scannedTo === null ? cfg.deployBlock : this.scannedTo + 1n;
-    if (from > latest) return;
-
     const chunk = cfg.logChunk;
-    const executed = new Map<Hex, bigint>();
+
     for (let start = from; start <= latest; start += chunk) {
       const end = start + chunk - 1n < latest ? start + chunk - 1n : latest;
-      const [posted, done, returns] = await Promise.all([
+      const [proposals, returns, exits] = await Promise.all([
         publicClient.getLogs({
           address: cfg.governor,
-          event: proposalPostedEvent,
-          fromBlock: start,
-          toBlock: end,
-          strict: true,
-        }),
-        publicClient.getLogs({
-          address: cfg.governor,
-          event: proposalExecutedEvent,
+          events: [proposalPostedEvent, proposalExecutedEvent],
           fromBlock: start,
           toBlock: end,
           strict: true,
@@ -113,11 +117,27 @@ export class ChainView {
           toBlock: end,
           strict: true,
         }),
+        publicClient.getLogs({
+          address: cfg.vault,
+          events: [withdrawalQueuedEvent, withdrawalClaimedEvent],
+          fromBlock: start,
+          toBlock: end,
+          strict: true,
+        }),
       ]);
-      for (const log of posted) {
+      const executed = new Map<Hex, {block: bigint; at: bigint}>();
+      for (const log of proposals) {
+        if (log.eventName !== "ProposalExecuted") continue;
+        const {timestamp} = await publicClient.getBlock({blockNumber: log.blockNumber});
+        executed.set(log.args.proposalId, {block: log.blockNumber, at: timestamp});
+      }
+
+      // Nothing below asks the chain anything, so nothing below can fail halfway.
+      for (const log of proposals) {
+        if (log.eventName !== "ProposalPosted") continue;
         this.history.push({
           id: log.args.proposalId,
-          // Until its calldata is read, just below, a proposal is nobody's.
+          // Until its calldata is read, in refreshStates, a proposal is nobody's.
           kind: "other",
           assets: log.args.assets,
           executableAt: log.args.executableAt,
@@ -127,18 +147,24 @@ export class ChainView {
           executedBlock: null,
         });
       }
-      for (const log of done) executed.set(log.args.proposalId, log.blockNumber);
-      for (const log of returns) this.liquidated.push({blockNumber: log.blockNumber, amount: log.args.returnedToVault});
-    }
-
-    for (const p of this.history) {
-      const at = executed.get(p.id);
-      if (at !== undefined && p.executedBlock === null) {
-        p.executedBlock = at;
-        p.executedAt = (await publicClient.getBlock({blockNumber: at})).timestamp;
+      for (const p of this.history) {
+        const done = executed.get(p.id);
+        if (done && p.executedBlock === null) {
+          p.executedBlock = done.block;
+          p.executedAt = done.at;
+        }
       }
+      for (const log of returns) this.liquidated.push({blockNumber: log.blockNumber, amount: log.args.returnedToVault});
+      for (const log of exits) {
+        applyExit(
+          this.queue,
+          log.eventName === "WithdrawalQueued"
+            ? {kind: "queued", requestId: log.args.requestId, shares: log.args.shares}
+            : {kind: "claimed", requestId: log.args.requestId},
+        );
+      }
+      this.scannedTo = end;
     }
-    this.scannedTo = latest;
   }
 
   /** Re-read every proposal that can still change: its state, and what it asks for. */
@@ -165,37 +191,15 @@ export class ChainView {
   // ---------------------------------------------------------------- reads
 
   /**
-   * What the queued exits are owed: the unclaimed entries of the vault's queue,
-   * read a page at a time. The queue only grows and anyone can add to it, so
-   * past QUEUE_READ_LIMIT entries the runner stops reading it one by one and
-   * takes the vault's own share balance instead. The vault holds the shares
-   * of every queued exit until it is claimed, so that balance is never less
-   * than the queue. It is not the first choice because anyone can also send
-   * the vault shares, and those would count as exits waiting for ever.
+   * What the queued exits are owed. The queue is kept from the vault's own
+   * events, a request added when it is queued and dropped when it is claimed,
+   * so a round reads only what is new: the queue itself only grows, anyone can
+   * add to it, and reading it entry by entry would let them set how much work
+   * a round is.
    */
   private async queuedAssets(): Promise<bigint> {
     const {publicClient, cfg} = this.ctx;
-    const length = await publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "queueLength"});
-    if (length === 0n) return 0n;
-
-    let shares = 0n;
-    if (length > QUEUE_READ_LIMIT) {
-      this.ctx.log(`warning: the exit queue has ${length} entries; counting the vault's own share balance as queued instead of reading them`);
-      shares = await publicClient.readContract({address: cfg.vault, abi: erc20Abi, functionName: "balanceOf", args: [cfg.vault]});
-    } else {
-      for (let start = 0; start < Number(length); start += QUEUE_PAGE) {
-        const entries = await publicClient.multicall({
-          contracts: Array.from({length: Math.min(QUEUE_PAGE, Number(length) - start)}, (_, i) => ({
-            address: cfg.vault,
-            abi: vaultQueueAbi,
-            functionName: "withdrawalQueue" as const,
-            args: [BigInt(start + i)] as const,
-          })),
-          allowFailure: false,
-        });
-        shares += unclaimedShares(entries.map(([s, , , claimed]) => ({shares: s, claimed})));
-      }
-    }
+    const shares = waitingShares(this.queue);
     if (shares === 0n) return 0n;
     return publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "previewRedeem", args: [shares]});
   }
