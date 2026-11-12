@@ -95,7 +95,12 @@ export function decide(view: FundView, policy: Policy): Action {
     return executable ? {kind: "execute", id} : {kind: "abandon", id};
   }
 
-  if (view.deployed === 0n) {
+  // A funding that has executed and has not been settled is an open cycle,
+  // whatever the vault's own books say: the vault closes a deployment the
+  // moment the strategy returns it, so `deployed` is back to zero before the
+  // cycle's settle. Without one, the runner may open a cycle, and only then.
+  if (!view.funding) {
+    if (view.deployed !== 0n) return {kind: "idle", reason: "no executed funding proposal to settle"};
     // The kill switch holds after the unwind it forced: a settled cycle must
     // not turn straight into a new position.
     if (policy.forceUnwind) return {kind: "idle", reason: "force unwind: not opening a new position"};
@@ -104,19 +109,18 @@ export function decide(view: FundView, policy: Policy): Action {
     return {kind: "propose-buy", assets};
   }
 
-  // Capital is out. The cycle is sell -> return -> settle. Each step is done
-  // once: what has already executed says which is next, and the strategy's
-  // balances only say whether there is anything to do it with. Anyone can send
-  // the strategy a speck of either token, and a step that looked at balances
-  // alone would be repeated, a day's veto window at a time, for as long as
-  // someone kept sending. Float that arrives mid-cycle stays idle: a second
-  // funding would break the one-settle-per-cycle accounting.
+  // The cycle is sell -> return -> settle. Each step is done once: what has
+  // already executed says which is next, and the strategy's balances only say
+  // whether there is anything to do it with. Anyone can send the strategy a
+  // speck of either token, and a step that looked at balances alone would be
+  // repeated, a day's veto window at a time, for as long as someone kept
+  // sending. Float that arrives mid-cycle stays idle: a second funding would
+  // break the one-settle-per-cycle accounting.
   const {base, leg} = view.holdings;
 
-  // A return has run, so the cycle is over and only the booking is left. It
-  // comes before everything else: until settle, the vault counts the returned
-  // assets twice and prices every exit on the inflated number.
-  if (view.funding && view.returned !== null) {
+  // A return has run, so the cycle is over and only the booking is left: the
+  // fee, and the proposal marked settled so the next cycle can open.
+  if (view.returned !== null) {
     return {kind: "settle", id: view.funding.id, returned: view.returned};
   }
 
@@ -126,7 +130,6 @@ export function decide(view: FundView, policy: Policy): Action {
 
   if (base > 0n) return {kind: "propose-return"};
 
-  if (!view.funding) return {kind: "idle", reason: "no executed funding proposal to settle"};
   return {kind: "idle", reason: "returned amount unknown, not settling"};
 }
 

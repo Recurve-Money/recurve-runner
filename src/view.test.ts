@@ -89,6 +89,27 @@ describe("ChainView", () => {
     expect(asked.slice(first)).toEqual([]); // the head has not moved: nothing new to ask
   });
 
+  it("stays a few blocks behind the head, where nothing is replaced any more", async () => {
+    const {view, asked} = chain();
+    await view.read();
+    expect(asked.map((a) => a.toBlock).reduce((x, y) => (x > y ? x : y))).toBe(245n); // the head is 250
+  });
+
+  it("forgets its history when the chain no longer has what the logs showed, and reads it again", async () => {
+    let reads = 0;
+    const {view} = chain(() => false, 2n);
+    const client = (view as unknown as {ctx: Context}).ctx.publicClient as unknown as {
+      readContract: (a: {functionName: string; args: [bigint]}) => Promise<bigint>;
+    };
+    const plain = client.readContract;
+    // The vault says one request the first time it is asked: one of the two in the logs is gone.
+    client.readContract = async (a) => (a.functionName === "queueLength" && reads++ === 0 ? 1n : plain(a));
+    await expect(view.read()).rejects.toThrow("reorganised");
+    const fund = await view.read();
+    expect(fund.returned).toBe(110n);
+    expect(fund.queuedAssets).toBe(6n);
+  });
+
   it("refuses to act when the vault's queue is longer than the logs account for", async () => {
     // Two requests are in the logs. A vault that says three has an exit the
     // runner never saw: its float is not free, whatever the logs suggest.

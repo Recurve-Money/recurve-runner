@@ -38,8 +38,10 @@ Each step runs once per cycle, and what has already executed decides which is
 next: the strategy's balances only say whether there is anything to do it
 with. Anyone can send the strategy a speck of either token, and it must not
 cost the fund another day's veto window. Once a return has run the runner
-settles before anything else, within seconds of the return's execution:
-until `settle` the vault counts the returned assets twice.
+settles before anything else, within seconds of the return's execution. The
+vault has closed the deployment by then, in the transaction that returned it,
+so nothing is mispriced while a settle waits; but the fee is not charged and
+the next cycle cannot open until it runs.
 
 Only proposals that make one of the runner's three calls (`buy` or `sell` of
 its own token, `returnToVault`) on its own strategy count as its work. Anything

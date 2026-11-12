@@ -21,6 +21,12 @@ import {applyExit, currentFunding, newestPending, proposalKind, returnedSince, s
 
 const FINAL = new Set([2, 3, 5]); // Vetoed, Blocked, Settled: never change again
 
+/**
+ * How far behind the head the log scan stays. What it reads is kept for the
+ * life of the process, so it reads only blocks old enough not to be replaced.
+ */
+const CONFIRMATIONS = 5n;
+
 export class ChainView {
   private history: ProposalRecord[] = [];
   /** Every `Liquidated` the strategy has emitted: what each `returnToVault` sent back. */
@@ -40,12 +46,13 @@ export class ChainView {
     const block = await publicClient.getBlock();
     const now = block.timestamp;
 
-    await this.extendHistory(block.number);
+    const settled = block.number > CONFIRMATIONS ? block.number - CONFIRMATIONS : 0n;
+    await this.extendHistory(settled);
     await this.refreshStates();
 
     const [snap, queuedAssets, holdings] = await Promise.all([
       recurve.vault.snapshot(),
-      this.queuedAssets(block.number),
+      this.queuedAssets(settled),
       this.holdings(),
     ]);
 
@@ -87,6 +94,16 @@ export class ChainView {
   }
 
   // ---------------------------------------------------------------- history
+
+  /** Drops everything read from logs. The next round starts from the deploy block. */
+  private forget(): void {
+    this.history = [];
+    this.liquidated = [];
+    this.queue.clear();
+    this.requests = 0n;
+    this.scannedTo = null;
+    this.abandoned.clear();
+  }
 
   /**
    * Reads the logs since the last round, in steps the RPC will answer. A step
@@ -210,10 +227,21 @@ export class ChainView {
   private async queuedAssets(at: bigint): Promise<bigint> {
     const {publicClient, cfg} = this.ctx;
     const length = await publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "queueLength", blockNumber: at});
-    if (length !== this.requests) {
+    if (length > this.requests) {
       throw new Error(
         `The vault's exit queue holds ${length} request(s) at block ${at} but the logs since block ${cfg.deployBlock} show ${this.requests}. ` +
           `RECURVE_DEPLOY_BLOCK is later than the vault's deploy, or the RPC is not returning every log; not acting on an incomplete queue.`,
+      );
+    }
+    if (length < this.requests) {
+      // The logs showed requests the chain no longer has: blocks this process
+      // read were replaced. Nothing it remembers can be trusted, so it forgets
+      // all of it and the next round reads the history again from the start.
+      const seen = this.requests;
+      this.forget();
+      throw new Error(
+        `The logs showed ${seen} exit request(s) but the vault holds ${length} at block ${at}: the chain was reorganised under this runner. ` +
+          `Its history is dropped and rebuilt from block ${cfg.deployBlock} on the next round.`,
       );
     }
     const shares = waitingShares(this.queue);

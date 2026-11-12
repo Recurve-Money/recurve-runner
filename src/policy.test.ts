@@ -172,6 +172,20 @@ describe("decide: capital is deployed", () => {
     expect(decide(v, policy)).toEqual({kind: "settle", id: FUND, returned: (ETH * 11n) / 10n});
   });
 
+  it("settles an open cycle even when the vault already shows nothing deployed", () => {
+    // The vault closes a deployment in the transaction that returns it. Read
+    // by `deployed` alone, a cycle waiting for its settle would look like no
+    // cycle at all, and the runner would buy again with the fee never charged.
+    const returned = (ETH * 11n) / 10n;
+    const v = view({float: returned, deployed: 0n, totalAssets: returned, funding, sold: true, returned});
+    expect(decide(v, policy)).toEqual({kind: "settle", id: FUND, returned});
+  });
+
+  it("settles a cycle that came back with nothing", () => {
+    const v = {...holding, sold: true, holdings: {base: 0n, leg: 0n}, returned: 0n};
+    expect(decide(v, policy)).toEqual({kind: "settle", id: FUND, returned: 0n});
+  });
+
   it("refuses to settle without the returned amount", () => {
     const v = {...holding, holdings: {base: 0n, leg: 0n}, returned: null};
     expect(decide(v, policy)).toEqual({kind: "idle", reason: "returned amount unknown, not settling"});
