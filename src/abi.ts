@@ -135,6 +135,7 @@ export const governorExtraAbi = [
 
 /** Vault reads the SDK does not expose. */
 export const vaultQueueAbi = [
+  {type: "function", name: "queueLength", stateMutability: "view", inputs: [], outputs: [{type: "uint256"}]},
   {
     type: "function",
     name: "previewRedeem",

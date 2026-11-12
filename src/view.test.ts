@@ -38,7 +38,7 @@ const LOGS = [
 ];
 
 /** A chain whose log requests can be told to fail: `failing(call)` is asked before each one. */
-function chain(failing: (call: {address: string; fromBlock: bigint}) => boolean = () => false) {
+function chain(failing: (call: {address: string; fromBlock: bigint}) => boolean = () => false, queueLength = 2n) {
   const asked: {address: string; fromBlock: bigint; toBlock: bigint}[] = [];
   const publicClient = {
     getBlock: async (args?: {blockNumber: bigint}) =>
@@ -54,7 +54,8 @@ function chain(failing: (call: {address: string; fromBlock: bigint}) => boolean 
         const p = PROPOSALS[c.args[0]]!;
         return [STRATEGY, p.assets, p.callData, 0n, 0n, 0n, p.state];
       }),
-    readContract: async ({args}: {args: [bigint]}) => args[0] * 2n, // previewRedeem: two assets a share
+    readContract: async ({functionName, args}: {functionName: string; args: [bigint]}) =>
+      functionName === "queueLength" ? queueLength : args[0] * 2n, // previewRedeem: two assets a share
     simulateContract: async () => ({}),
   };
   const ctx = {
@@ -86,6 +87,13 @@ describe("ChainView", () => {
     const first = asked.length;
     await view.read();
     expect(asked.slice(first)).toEqual([]); // the head has not moved: nothing new to ask
+  });
+
+  it("refuses to act when the vault's queue is longer than the logs account for", async () => {
+    // Two requests are in the logs. A vault that says three has an exit the
+    // runner never saw: its float is not free, whatever the logs suggest.
+    const {view} = chain(() => false, 3n);
+    await expect(view.read()).rejects.toThrow("holds 3 request(s)");
   });
 
   it("counts a return once when a later step fails and the round is run again", async () => {

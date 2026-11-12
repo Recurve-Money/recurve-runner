@@ -27,6 +27,8 @@ export class ChainView {
   private liquidated: {blockNumber: bigint; amount: bigint}[] = [];
   /** Queued exits not yet claimed: request id to shares. */
   private queue = new Map<bigint, bigint>();
+  /** How many exits the logs have shown being queued, claimed or not. */
+  private requests = 0n;
   private scannedTo: bigint | null = null;
   /** Proposals whose window closed with execute() reverting. Reported once, then skipped. */
   private abandoned = new Set<Hex>();
@@ -43,7 +45,7 @@ export class ChainView {
 
     const [snap, queuedAssets, holdings] = await Promise.all([
       recurve.vault.snapshot(),
-      this.queuedAssets(),
+      this.queuedAssets(block.number),
       this.holdings(),
     ]);
 
@@ -156,6 +158,7 @@ export class ChainView {
       }
       for (const log of returns) this.liquidated.push({blockNumber: log.blockNumber, amount: log.args.returnedToVault});
       for (const log of exits) {
+        if (log.eventName === "WithdrawalQueued") this.requests += 1n;
         applyExit(
           this.queue,
           log.eventName === "WithdrawalQueued"
@@ -196,9 +199,23 @@ export class ChainView {
    * so a round reads only what is new: the queue itself only grows, anyone can
    * add to it, and reading it entry by entry would let them set how much work
    * a round is.
+   *
+   * The events are checked against the chain every round. The vault numbers
+   * its requests from zero and never removes one, so its queue is exactly as
+   * long as the number of requests the logs have shown, read at the same
+   * block. If it is longer, the logs are incomplete (a deploy block set too
+   * late, an RPC that drops logs) and exits are waiting that the runner cannot
+   * see: the round fails rather than trade as if they were not there.
    */
-  private async queuedAssets(): Promise<bigint> {
+  private async queuedAssets(at: bigint): Promise<bigint> {
     const {publicClient, cfg} = this.ctx;
+    const length = await publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "queueLength", blockNumber: at});
+    if (length !== this.requests) {
+      throw new Error(
+        `The vault's exit queue holds ${length} request(s) at block ${at} but the logs since block ${cfg.deployBlock} show ${this.requests}. ` +
+          `RECURVE_DEPLOY_BLOCK is later than the vault's deploy, or the RPC is not returning every log; not acting on an incomplete queue.`,
+      );
+    }
     const shares = waitingShares(this.queue);
     if (shares === 0n) return 0n;
     return publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "previewRedeem", args: [shares]});
