@@ -38,6 +38,8 @@ export interface FundView {
   funding: FundingProposal | null;
   /** What the strategy holds: base asset and the one basket leg. */
   holdings: {base: bigint; leg: bigint};
+  /** Whether a sell has executed since the funding. */
+  sold: boolean;
   /** Assets `returnToVault` sent back this cycle, read off its event. Null until it has run. */
   returned: bigint | null;
 }
@@ -102,20 +104,30 @@ export function decide(view: FundView, policy: Policy): Action {
     return {kind: "propose-buy", assets};
   }
 
-  // Capital is out. The cycle is sell -> return -> settle, and the vault's
-  // holdings say which step is next. Float that arrives mid-cycle stays idle:
-  // a second funding would break the one-settle-per-cycle accounting.
+  // Capital is out. The cycle is sell -> return -> settle. Each step is done
+  // once: what has already executed says which is next, and the strategy's
+  // balances only say whether there is anything to do it with. Anyone can send
+  // the strategy a speck of either token, and a step that looked at balances
+  // alone would be repeated, a day's veto window at a time, for as long as
+  // someone kept sending. Float that arrives mid-cycle stays idle: a second
+  // funding would break the one-settle-per-cycle accounting.
   const {base, leg} = view.holdings;
 
-  if (leg > 0n) {
+  // A return has run, so the cycle is over and only the booking is left. It
+  // comes before everything else: until settle, the vault counts the returned
+  // assets twice and prices every exit on the inflated number.
+  if (view.funding && view.returned !== null) {
+    return {kind: "settle", id: view.funding.id, returned: view.returned};
+  }
+
+  if (leg > 0n && !view.sold) {
     return unwindDue(view, policy) ? {kind: "propose-sell", amount: leg} : {kind: "idle", reason: "holding"};
   }
 
   if (base > 0n) return {kind: "propose-return"};
 
   if (!view.funding) return {kind: "idle", reason: "no executed funding proposal to settle"};
-  if (view.returned === null) return {kind: "idle", reason: "returned amount unknown, not settling"};
-  return {kind: "settle", id: view.funding.id, returned: view.returned};
+  return {kind: "idle", reason: "returned amount unknown, not settling"};
 }
 
 function unwindDue(view: FundView, policy: Policy): boolean {

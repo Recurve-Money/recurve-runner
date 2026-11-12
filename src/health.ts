@@ -21,6 +21,15 @@ export interface Status {
   failing: number;
 }
 
+/**
+ * An error message fit for `/health`, which anyone who can reach the port can
+ * read: every URL cut down to its scheme and host. RPC endpoints carry their
+ * key in the path or the query, and RPC errors quote the endpoint.
+ */
+export function withoutUrlSecrets(message: string): string {
+  return message.replace(/(https?|wss?):\/\/(?:[^\s\/@"']*@)?([^\s\/"'?#]+)[^\s"']*/g, "$1://$2/...");
+}
+
 export function serveStatus(port: number, status: () => Status): Server {
   const server = createServer((req, res) => {
     if (req.url !== "/" && req.url !== "/health") {

@@ -133,21 +133,8 @@ export const governorExtraAbi = [
   },
 ] as const;
 
-/** The redemption queue, which the SDK only exposes per owner. */
+/** Vault reads the SDK does not expose. */
 export const vaultQueueAbi = [
-  {type: "function", name: "queueLength", stateMutability: "view", inputs: [], outputs: [{type: "uint256"}]},
-  {
-    type: "function",
-    name: "withdrawalQueue",
-    stateMutability: "view",
-    inputs: [{type: "uint256"}],
-    outputs: [
-      {name: "shares", type: "uint256"},
-      {name: "requestedAt", type: "uint256"},
-      {name: "receiver", type: "address"},
-      {name: "claimed", type: "bool"},
-    ],
-  },
   {
     type: "function",
     name: "previewRedeem",

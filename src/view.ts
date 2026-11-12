@@ -2,8 +2,7 @@ import {ContractFunctionExecutionError, type Hex} from "viem";
 import {erc20Abi, governorExtraAbi, liquidatedEvent, proposalExecutedEvent, proposalPostedEvent, vaultQueueAbi} from "./abi.js";
 import type {Context} from "./context.js";
 import type {FundView} from "./policy.js";
-import {currentFunding, newestPending, returnedSince, type ProposalRecord} from "./select.js";
-import {unclaimedShares} from "./trade.js";
+import {currentFunding, newestPending, proposalKind, returnedSince, soldSince, type ProposalRecord} from "./select.js";
 
 /**
  * Reads the chain into a `FundView` for the policy. The governor's proposal
@@ -37,6 +36,7 @@ export class ChainView {
 
     const funding = currentFunding(this.history);
     const returned = funding ? await this.returned(funding.executedBlock, block.number) : null;
+    const sold = funding ? soldSince(this.history, funding.executedBlock) : false;
 
     const head = newestPending(this.history, this.abandoned);
     let pending: FundView["pending"] = null;
@@ -48,9 +48,13 @@ export class ChainView {
       pending = {...head, executable};
     }
 
-    const stale = this.history.filter((p) => p.state === 1 && p.id !== head?.id);
+    const stale = this.history.filter((p) => p.state === 1 && p.id !== head?.id && p.kind !== "other");
     if (stale.length > 0) {
       this.ctx.log(`warning: ${stale.length} older proposal(s) still Pending on the governor and ignored: ${stale.map((p) => p.id).join(", ")}`);
+    }
+    const foreign = this.history.filter((p) => p.state === 1 && p.kind === "other");
+    if (foreign.length > 0) {
+      this.ctx.log(`warning: ${foreign.length} Pending proposal(s) on the governor are not this runner's (another target, or a call it never makes) and are left alone: ${foreign.map((p) => p.id).join(", ")}`);
     }
 
     return {
@@ -62,6 +66,7 @@ export class ChainView {
       pending,
       funding: funding ? {id: funding.id, assets: funding.assets, executedAt: funding.executedAt} : null,
       holdings,
+      sold,
       returned,
     };
   }
@@ -96,6 +101,8 @@ export class ChainView {
       for (const log of posted) {
         this.history.push({
           id: log.args.proposalId,
+          // Until its calldata is read, just below, a proposal is nobody's.
+          kind: "other",
           assets: log.args.assets,
           executableAt: log.args.executableAt,
           postedBlock: log.blockNumber,
@@ -117,7 +124,7 @@ export class ChainView {
     this.scannedTo = latest;
   }
 
-  /** Re-read the state of every proposal that can still change. */
+  /** Re-read every proposal that can still change: its state, and what it asks for. */
   private async refreshStates(): Promise<void> {
     const {publicClient, cfg} = this.ctx;
     const open = this.history.filter((p) => !FINAL.has(p.state));
@@ -132,27 +139,24 @@ export class ChainView {
       allowFailure: false,
     });
     open.forEach((p, i) => {
-      const [, , , , , , state] = results[i]!;
+      const [target, , callData, , , , state] = results[i]!;
       p.state = Number(state);
+      p.kind = proposalKind(target, callData, cfg.strategy);
     });
   }
 
   // ---------------------------------------------------------------- reads
 
+  /**
+   * What the queued exits are owed. The vault holds the shares of every queued
+   * exit itself until the exit is claimed, so its own share balance is the
+   * whole queue in one read, however many requests there are: the queue only
+   * grows, and anyone can add to it. Shares sent to the vault by mistake count
+   * as well, which only keeps a little more of the float idle.
+   */
   private async queuedAssets(): Promise<bigint> {
     const {publicClient, cfg} = this.ctx;
-    const length = await publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "queueLength"});
-    if (length === 0n) return 0n;
-    const entries = await publicClient.multicall({
-      contracts: Array.from({length: Number(length)}, (_, i) => ({
-        address: cfg.vault,
-        abi: vaultQueueAbi,
-        functionName: "withdrawalQueue" as const,
-        args: [BigInt(i)] as const,
-      })),
-      allowFailure: false,
-    });
-    const shares = unclaimedShares(entries.map(([s, , , claimed]) => ({shares: s, claimed})));
+    const shares = await publicClient.readContract({address: cfg.vault, abi: erc20Abi, functionName: "balanceOf", args: [cfg.vault]});
     if (shares === 0n) return 0n;
     return publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "previewRedeem", args: [shares]});
   }

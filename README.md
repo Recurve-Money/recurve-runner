@@ -34,6 +34,17 @@ governor's `ProposalPosted`/`ProposalExecuted` logs, each proposal's live
 state, the strategy's balances, the strategy's `Liquidated` event — so a
 restart mid-cycle picks up exactly where the chain is.
 
+Each step runs once per cycle, and what has already executed decides which is
+next: the strategy's balances only say whether there is anything to do it
+with. Anyone can send the strategy a speck of either token, and it must not
+cost the fund another day's veto window. Once a return has run the runner
+settles before anything else, within seconds of the return's execution:
+until `settle` the vault counts the returned assets twice.
+
+Only proposals that make one of the runner's three calls (`buy`, `sell`,
+`returnToVault`) on its own strategy count as its work. Anything else on the
+governor is logged and left alone: never executed, never settled.
+
 ## Layout
 
 ```

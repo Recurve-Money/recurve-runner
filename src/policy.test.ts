@@ -24,6 +24,7 @@ function view(over: Partial<FundView> = {}): FundView {
     pending: null,
     funding: null,
     holdings: {base: 0n, leg: 0n},
+    sold: false,
     returned: null,
     ...over,
   };
@@ -144,8 +145,26 @@ describe("decide: capital is deployed", () => {
   });
 
   it("returns base to the vault once the leg is sold", () => {
-    const v = {...holding, holdings: {base: ETH, leg: 0n}};
+    const v = {...holding, sold: true, holdings: {base: ETH, leg: 0n}};
     expect(decide(v, policy)).toEqual({kind: "propose-return"});
+  });
+
+  it("does not sell twice: a speck of the leg sent in after the sell does not hold the return back", () => {
+    // Anyone can send the strategy tokens. Selling again would cost a day's
+    // veto window each time, for as long as someone kept sending.
+    const v = {...holding, sold: true, holdings: {base: ETH, leg: 1n}};
+    expect(decide(v, {...policy, forceUnwind: true})).toEqual({kind: "propose-return"});
+  });
+
+  it("settles as soon as a return has run, whatever was sent to the strategy since", () => {
+    // Until settle the vault counts the returned assets twice, so nothing may
+    // come between a return and its settle: not a stray wei of the base asset
+    // (which used to mean another return, and another day), nor of the leg.
+    const returned = (ETH * 11n) / 10n;
+    const settle = {kind: "settle", id: FUND, returned};
+    expect(decide({...holding, sold: true, holdings: {base: 1n, leg: 0n}, returned}, policy)).toEqual(settle);
+    expect(decide({...holding, sold: true, holdings: {base: 0n, leg: 1n}, returned}, policy)).toEqual(settle);
+    expect(decide({...holding, sold: true, holdings: {base: 1n, leg: 1n}, returned}, {...policy, forceUnwind: true})).toEqual(settle);
   });
 
   it("settles the funding proposal once the base is back in the vault", () => {

@@ -16,9 +16,12 @@ import {existsSync} from "node:fs";
 import {boot, log} from "./boot.js";
 import {loadConfig} from "./config.js";
 import {perform} from "./executor.js";
-import {serveStatus, type Status} from "./health.js";
+import {serveStatus, withoutUrlSecrets, type Status} from "./health.js";
 import {decide} from "./policy.js";
 import {ChainView} from "./view.js";
+
+/** Long enough for the RPC to serve the block the execution landed in. */
+const AFTER_EXECUTE_MS = 5000;
 
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
@@ -71,10 +74,16 @@ async function main(): Promise<void> {
 
   while (!stopping) {
     status.rounds += 1;
+    // After a proposal executes the next step is often due at once, and one
+    // of them cannot wait: until a return is settled the vault counts the
+    // returned assets twice. So the round after an execution follows in
+    // seconds, not after the usual interval.
+    let executed = false;
     try {
       const fund = await view.read();
       const action = decide(fund, policy);
       const outcome = await perform(ctx, fund, action);
+      executed = action.kind === "execute" && !cfg.dryRun;
       log(
         `float=${fund.float} deployed=${fund.deployed} queued=${fund.queuedAssets} leg=${fund.holdings.leg} base=${fund.holdings.base} -> ${outcome}`,
       );
@@ -88,13 +97,13 @@ async function main(): Promise<void> {
       // /health says so.
       status.failing += 1;
       status.ok = status.failing < 3;
-      status.lastError = err instanceof Error ? err.message : String(err);
+      status.lastError = withoutUrlSecrets(err instanceof Error ? err.message : String(err));
       console.error(`${new Date().toISOString()} [runner] round failed (${status.failing} in a row):`, err);
     }
     status.lastRoundAt = new Date().toISOString();
 
     // Back off while failing so a dead RPC is not hammered every minute.
-    const wait = Math.min(cfg.intervalMs * 2 ** Math.min(status.failing, 4), 10 * 60 * 1000);
+    const wait = executed ? AFTER_EXECUTE_MS : Math.min(cfg.intervalMs * 2 ** Math.min(status.failing, 4), 10 * 60 * 1000);
     for (let waited = 0; waited < wait && !stopping; waited += 1000) await sleep(1000);
   }
 

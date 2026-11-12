@@ -1,6 +1,7 @@
 import {describe, expect, it} from "vitest";
 import {ProposalState} from "@recurvemoney/sdk";
-import {currentFunding, newestPending, returnedSince, type ProposalRecord} from "./select.js";
+import {encodeBuy, encodeReturn, encodeSell} from "./trade.js";
+import {currentFunding, newestPending, proposalKind, returnedSince, soldSince, type ProposalRecord} from "./select.js";
 
 const id = (n: number) => `0x${n.toString(16).padStart(64, "0")}` as const;
 
@@ -8,6 +9,7 @@ function rec(over: Partial<ProposalRecord> & {n: number}): ProposalRecord {
   const {n, ...rest} = over;
   return {
     id: id(n),
+    kind: "buy",
     assets: 0n,
     executableAt: 0n,
     postedBlock: BigInt(n),
@@ -35,6 +37,14 @@ describe("newestPending", () => {
     expect(newestPending([])).toBeNull();
   });
 
+  it("looks past a proposal that is not the runner's, pending or not", () => {
+    // Another agent's proposal, or one aimed somewhere else: never executed
+    // from here, and never a reason to stop working the runner's own.
+    const mine = rec({n: 1, executableAt: 5n});
+    expect(newestPending([mine, rec({n: 2, kind: "other"})])).toEqual({id: id(1), executableAt: 5n});
+    expect(newestPending([rec({n: 1, kind: "other"})])).toBeNull();
+  });
+
   it("returns null when the newest pending proposal has been abandoned", () => {
     // Abandoned once, abandoned for good: the runner moves on and proposes
     // afresh instead of reporting the same dead proposal every round.
@@ -53,6 +63,14 @@ describe("currentFunding", () => {
     expect(currentFunding(list)).toEqual({id: id(2), assets: 20n, executedAt: 200n, executedBlock: 2n});
   });
 
+  it("is never a proposal that is not one of the runner's buys", () => {
+    // Settling it would book this runner's return against someone else's funding.
+    const list = [
+      rec({n: 1, kind: "other", assets: 20n, state: ProposalState.Executed, executedAt: 200n, executedBlock: 2n}),
+    ];
+    expect(currentFunding(list)).toBeNull();
+  });
+
   it("ignores settled, vetoed and pending proposals", () => {
     const list = [
       rec({n: 1, assets: 10n, state: ProposalState.Settled, executedAt: 100n, executedBlock: 1n}),
@@ -63,14 +81,52 @@ describe("currentFunding", () => {
   });
 });
 
+describe("soldSince", () => {
+  const sell = (n: number, block: bigint | null) =>
+    rec({n, kind: "sell", state: block === null ? ProposalState.Pending : ProposalState.Executed, executedBlock: block});
+
+  it("is true once a sell has executed after the funding", () => {
+    expect(soldSince([sell(1, 12n)], 10n)).toBe(true);
+  });
+
+  it("is false for a sell that is only proposed, or that belongs to an earlier cycle", () => {
+    expect(soldSince([sell(1, null)], 10n)).toBe(false);
+    expect(soldSince([sell(1, 8n)], 10n)).toBe(false);
+  });
+});
+
+describe("proposalKind", () => {
+  const strategy = "0x00000000000000000000000000000000000000AA";
+  const token = "0x00000000000000000000000000000000000000bb";
+  const floor = {quotedOut: 2n, minAmountOut: 1n};
+
+  it("names the three calls the runner makes on its strategy", () => {
+    expect(proposalKind(strategy, encodeBuy(token, 1n, floor), strategy)).toBe("buy");
+    expect(proposalKind(strategy, encodeSell(token, 1n, floor), strategy)).toBe("sell");
+    expect(proposalKind(strategy, encodeReturn(), strategy)).toBe("return");
+  });
+
+  it("compares addresses whatever their case", () => {
+    expect(proposalKind("0x00000000000000000000000000000000000000aa", encodeReturn(), strategy)).toBe("return");
+  });
+
+  it("is other for another target, another call, or no call at all", () => {
+    expect(proposalKind(token, encodeReturn(), strategy)).toBe("other");
+    expect(proposalKind(strategy, "0xa9059cbb0000", strategy)).toBe("other");
+    expect(proposalKind(strategy, "0x", strategy)).toBe("other");
+  });
+});
+
 describe("returnedSince", () => {
-  it("is the latest Liquidated amount after the funding block", () => {
+  it("adds up every Liquidated amount after the funding block", () => {
+    // A second return in one cycle sends back only what arrived after the
+    // first. Taking the last one alone would book the cycle as a loss.
     const logs = [
       {blockNumber: 5n, amount: 1n},
       {blockNumber: 12n, amount: 2n},
       {blockNumber: 15n, amount: 3n},
     ];
-    expect(returnedSince(logs, 10n)).toBe(3n);
+    expect(returnedSince(logs, 10n)).toBe(5n);
   });
 
   it("ignores a Liquidated from a previous cycle", () => {
