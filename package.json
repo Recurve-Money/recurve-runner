@@ -5,7 +5,9 @@
   "version": "0.1.0",
   "scripts": {
     "start": "tsx src/index.ts",
-    "typecheck": "tsc --noEmit"
+    "dev": "tsx watch src/index.ts",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run"
   },
   "dependencies": {
     "@recurvemoney/sdk": "^0.1.0",
@@ -14,6 +16,7 @@
   "devDependencies": {
     "@types/node": "^26.3.0",
     "tsx": "^4.19.0",
-    "typescript": "^5.6.0"
+    "typescript": "^5.6.0",
+    "vitest": "^4.1.11"
   }
 }
