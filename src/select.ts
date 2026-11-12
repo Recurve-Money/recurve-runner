@@ -1,4 +1,4 @@
-import {toFunctionSelector, getAbiItem, type Hex} from "viem";
+import {decodeFunctionData, type Hex} from "viem";
 import {ProposalState} from "@recurvemoney/sdk";
 import {strategyAbi} from "./abi.js";
 
@@ -12,20 +12,28 @@ import {strategyAbi} from "./abi.js";
 /**
  * What a proposal asks for, read off its target and calldata: one of the three
  * calls this runner makes on its strategy, or `other`. An `other` proposal is
- * not this runner's work, whoever posted it, and is never executed, waited on
- * or settled here.
+ * never executed, waited on or settled here.
+ *
+ * This is the shape of a proposal, not who posted it: the governor does not
+ * record that, and a runner restarted with a new key has to be able to finish
+ * the cycle the old one began. Only an agent can post, the Safe decides who is
+ * one, and the runner is written for a governor where it is the only one. A
+ * second agent could post a buy or a sell here with a floor of its choosing,
+ * and this runner would execute it, as that agent could itself.
  */
 export type ProposalKind = "buy" | "sell" | "return" | "other";
 
-const SELECTORS: Record<string, ProposalKind> = {
-  [toFunctionSelector(getAbiItem({abi: strategyAbi, name: "buy"}))]: "buy",
-  [toFunctionSelector(getAbiItem({abi: strategyAbi, name: "sell"}))]: "sell",
-  [toFunctionSelector(getAbiItem({abi: strategyAbi, name: "returnToVault"}))]: "return",
-};
-
-export function proposalKind(target: Hex, callData: Hex, strategy: Hex): ProposalKind {
+export function proposalKind(target: Hex, callData: Hex, strategy: Hex, token: Hex): ProposalKind {
   if (target.toLowerCase() !== strategy.toLowerCase()) return "other";
-  return SELECTORS[callData.slice(0, 10).toLowerCase()] ?? "other";
+  try {
+    const call = decodeFunctionData({abi: strategyAbi, data: callData});
+    if (call.functionName === "returnToVault") return "return";
+    if (call.functionName !== "buy" && call.functionName !== "sell") return "other";
+    // The one leg this runner trades. A swap of anything else is not its own.
+    return call.args[0].toLowerCase() === token.toLowerCase() ? call.functionName : "other";
+  } catch {
+    return "other"; // no call, an unknown call, or arguments that do not decode
+  }
 }
 
 export interface ProposalRecord {

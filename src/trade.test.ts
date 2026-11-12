@@ -1,7 +1,7 @@
 import {decodeFunctionData, getAddress} from "viem";
 import {describe, expect, it} from "vitest";
 import {strategyAbi} from "./abi.js";
-import {encodeBuy, encodeReturn, encodeSell, tradeFloor} from "./trade.js";
+import {encodeBuy, encodeReturn, encodeSell, tradeFloor, unclaimedShares} from "./trade.js";
 
 const TOKEN = getAddress("0x" + "e".repeat(40));
 
@@ -47,5 +47,21 @@ describe("calldata", () => {
       functionName: "returnToVault",
       args: undefined,
     });
+  });
+});
+
+describe("unclaimedShares", () => {
+  it("sums the shares still waiting in the queue", () => {
+    expect(
+      unclaimedShares([
+        {shares: 10n, claimed: false},
+        {shares: 5n, claimed: true},
+        {shares: 3n, claimed: false},
+      ]),
+    ).toBe(13n);
+  });
+
+  it("is zero for an empty queue", () => {
+    expect(unclaimedShares([])).toBe(0n);
   });
 });

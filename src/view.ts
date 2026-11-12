@@ -3,6 +3,7 @@ import {erc20Abi, governorExtraAbi, liquidatedEvent, proposalExecutedEvent, prop
 import type {Context} from "./context.js";
 import type {FundView} from "./policy.js";
 import {currentFunding, newestPending, proposalKind, returnedSince, soldSince, type ProposalRecord} from "./select.js";
+import {unclaimedShares} from "./trade.js";
 
 /**
  * Reads the chain into a `FundView` for the policy. The governor's proposal
@@ -12,8 +13,14 @@ import {currentFunding, newestPending, proposalKind, returnedSince, soldSince, t
 
 const FINAL = new Set([2, 3, 5]); // Vetoed, Blocked, Settled: never change again
 
+/** Queue entries read per call, and how long a queue is still read entry by entry. */
+const QUEUE_PAGE = 500;
+const QUEUE_READ_LIMIT = 20_000n;
+
 export class ChainView {
   private history: ProposalRecord[] = [];
+  /** Every `Liquidated` the strategy has emitted: what each `returnToVault` sent back. */
+  private liquidated: {blockNumber: bigint; amount: bigint}[] = [];
   private scannedTo: bigint | null = null;
   /** Proposals whose window closed with execute() reverting. Reported once, then skipped. */
   private abandoned = new Set<Hex>();
@@ -35,7 +42,7 @@ export class ChainView {
     ]);
 
     const funding = currentFunding(this.history);
-    const returned = funding ? await this.returned(funding.executedBlock, block.number) : null;
+    const returned = funding ? returnedSince(this.liquidated, funding.executedBlock) : null;
     const sold = funding ? soldSince(this.history, funding.executedBlock) : false;
 
     const head = newestPending(this.history, this.abandoned);
@@ -82,7 +89,7 @@ export class ChainView {
     const executed = new Map<Hex, bigint>();
     for (let start = from; start <= latest; start += chunk) {
       const end = start + chunk - 1n < latest ? start + chunk - 1n : latest;
-      const [posted, done] = await Promise.all([
+      const [posted, done, returns] = await Promise.all([
         publicClient.getLogs({
           address: cfg.governor,
           event: proposalPostedEvent,
@@ -93,6 +100,15 @@ export class ChainView {
         publicClient.getLogs({
           address: cfg.governor,
           event: proposalExecutedEvent,
+          fromBlock: start,
+          toBlock: end,
+          strict: true,
+        }),
+        // In the same bounded steps as the rest: a position can be held for
+        // longer than the RPC will scan in one request.
+        publicClient.getLogs({
+          address: cfg.strategy,
+          event: liquidatedEvent,
           fromBlock: start,
           toBlock: end,
           strict: true,
@@ -112,6 +128,7 @@ export class ChainView {
         });
       }
       for (const log of done) executed.set(log.args.proposalId, log.blockNumber);
+      for (const log of returns) this.liquidated.push({blockNumber: log.blockNumber, amount: log.args.returnedToVault});
     }
 
     for (const p of this.history) {
@@ -141,22 +158,44 @@ export class ChainView {
     open.forEach((p, i) => {
       const [target, , callData, , , , state] = results[i]!;
       p.state = Number(state);
-      p.kind = proposalKind(target, callData, cfg.strategy);
+      p.kind = proposalKind(target, callData, cfg.strategy, cfg.token);
     });
   }
 
   // ---------------------------------------------------------------- reads
 
   /**
-   * What the queued exits are owed. The vault holds the shares of every queued
-   * exit itself until the exit is claimed, so its own share balance is the
-   * whole queue in one read, however many requests there are: the queue only
-   * grows, and anyone can add to it. Shares sent to the vault by mistake count
-   * as well, which only keeps a little more of the float idle.
+   * What the queued exits are owed: the unclaimed entries of the vault's queue,
+   * read a page at a time. The queue only grows and anyone can add to it, so
+   * past QUEUE_READ_LIMIT entries the runner stops reading it one by one and
+   * takes the vault's own share balance instead. The vault holds the shares
+   * of every queued exit until it is claimed, so that balance is never less
+   * than the queue. It is not the first choice because anyone can also send
+   * the vault shares, and those would count as exits waiting for ever.
    */
   private async queuedAssets(): Promise<bigint> {
     const {publicClient, cfg} = this.ctx;
-    const shares = await publicClient.readContract({address: cfg.vault, abi: erc20Abi, functionName: "balanceOf", args: [cfg.vault]});
+    const length = await publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "queueLength"});
+    if (length === 0n) return 0n;
+
+    let shares = 0n;
+    if (length > QUEUE_READ_LIMIT) {
+      this.ctx.log(`warning: the exit queue has ${length} entries; counting the vault's own share balance as queued instead of reading them`);
+      shares = await publicClient.readContract({address: cfg.vault, abi: erc20Abi, functionName: "balanceOf", args: [cfg.vault]});
+    } else {
+      for (let start = 0; start < Number(length); start += QUEUE_PAGE) {
+        const entries = await publicClient.multicall({
+          contracts: Array.from({length: Math.min(QUEUE_PAGE, Number(length) - start)}, (_, i) => ({
+            address: cfg.vault,
+            abi: vaultQueueAbi,
+            functionName: "withdrawalQueue" as const,
+            args: [BigInt(start + i)] as const,
+          })),
+          allowFailure: false,
+        });
+        shares += unclaimedShares(entries.map(([s, , , claimed]) => ({shares: s, claimed})));
+      }
+    }
     if (shares === 0n) return 0n;
     return publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "previewRedeem", args: [shares]});
   }
@@ -171,21 +210,6 @@ export class ChainView {
       allowFailure: false,
     });
     return {base: b, leg: l};
-  }
-
-  private async returned(fundingBlock: bigint, latest: bigint): Promise<bigint | null> {
-    const {publicClient, cfg} = this.ctx;
-    const logs = await publicClient.getLogs({
-      address: cfg.strategy,
-      event: liquidatedEvent,
-      fromBlock: fundingBlock,
-      toBlock: latest,
-      strict: true,
-    });
-    return returnedSince(
-      logs.map((l) => ({blockNumber: l.blockNumber, amount: l.args.returnedToVault})),
-      fundingBlock,
-    );
   }
 
   /**

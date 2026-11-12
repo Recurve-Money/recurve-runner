@@ -101,19 +101,21 @@ describe("proposalKind", () => {
   const floor = {quotedOut: 2n, minAmountOut: 1n};
 
   it("names the three calls the runner makes on its strategy", () => {
-    expect(proposalKind(strategy, encodeBuy(token, 1n, floor), strategy)).toBe("buy");
-    expect(proposalKind(strategy, encodeSell(token, 1n, floor), strategy)).toBe("sell");
-    expect(proposalKind(strategy, encodeReturn(), strategy)).toBe("return");
+    expect(proposalKind(strategy, encodeBuy(token, 1n, floor), strategy, token)).toBe("buy");
+    expect(proposalKind(strategy, encodeSell(token, 1n, floor), strategy, token)).toBe("sell");
+    expect(proposalKind(strategy, encodeReturn(), strategy, token)).toBe("return");
   });
 
   it("compares addresses whatever their case", () => {
-    expect(proposalKind("0x00000000000000000000000000000000000000aa", encodeReturn(), strategy)).toBe("return");
+    expect(proposalKind("0x00000000000000000000000000000000000000aa", encodeReturn(), strategy, token)).toBe("return");
+    expect(proposalKind(strategy, encodeBuy(token, 1n, floor), strategy, "0x00000000000000000000000000000000000000BB")).toBe("buy");
   });
 
-  it("is other for another target, another call, or no call at all", () => {
-    expect(proposalKind(token, encodeReturn(), strategy)).toBe("other");
-    expect(proposalKind(strategy, "0xa9059cbb0000", strategy)).toBe("other");
-    expect(proposalKind(strategy, "0x", strategy)).toBe("other");
+  it("is other for another target, another token, another call, or no call at all", () => {
+    expect(proposalKind(token, encodeReturn(), strategy, token)).toBe("other");
+    expect(proposalKind(strategy, encodeSell(strategy, 1n, floor), strategy, token)).toBe("other");
+    expect(proposalKind(strategy, "0xa9059cbb0000", strategy, token)).toBe("other");
+    expect(proposalKind(strategy, "0x", strategy, token)).toBe("other");
   });
 });
 

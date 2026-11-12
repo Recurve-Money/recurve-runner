@@ -27,7 +27,7 @@ export interface Status {
  * key in the path or the query, and RPC errors quote the endpoint.
  */
 export function withoutUrlSecrets(message: string): string {
-  return message.replace(/(https?|wss?):\/\/(?:[^\s\/@"']*@)?([^\s\/"'?#]+)[^\s"']*/g, "$1://$2/...");
+  return message.replace(/([a-z][a-z0-9+.-]*):\/\/(?:[^\s\/@"']*@)?([^\s\/"'?#]+)[^\s"']*/gi, "$1://$2/...");
 }
 
 export function serveStatus(port: number, status: () => Status): Server {

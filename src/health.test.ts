@@ -8,6 +8,12 @@ describe("withoutUrlSecrets", () => {
     );
   });
 
+  it("does the same whatever the scheme, or its case", () => {
+    expect(withoutUrlSecrets("HTTPS://rpc.example.com/KEY and postgres://u:p@db.example.com/x")).toBe(
+      "HTTPS://rpc.example.com/... and postgres://db.example.com/...",
+    );
+  });
+
   it("drops credentials written before the host", () => {
     expect(withoutUrlSecrets("failed: wss://user:pass@node.example.com:8546/ws")).toBe("failed: wss://node.example.com:8546/...");
   });

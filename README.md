@@ -41,9 +41,12 @@ cost the fund another day's veto window. Once a return has run the runner
 settles before anything else, within seconds of the return's execution:
 until `settle` the vault counts the returned assets twice.
 
-Only proposals that make one of the runner's three calls (`buy`, `sell`,
-`returnToVault`) on its own strategy count as its work. Anything else on the
-governor is logged and left alone: never executed, never settled.
+Only proposals that make one of the runner's three calls (`buy` or `sell` of
+its own token, `returnToVault`) on its own strategy count as its work. Anything
+else on the governor is logged and left alone: never executed, never settled.
+The governor does not record who posted a proposal, so this is its shape and
+not its author, and the runner is written for a governor where it is the only
+agent.
 
 ## Layout
 

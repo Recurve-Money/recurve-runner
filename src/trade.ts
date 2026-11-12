@@ -51,3 +51,8 @@ export function encodeSell(token: Hex, amountIn: bigint, floor: Floor): Hex {
 export function encodeReturn(): Hex {
   return encodeFunctionData({abi: strategyAbi, functionName: "returnToVault"});
 }
+
+/** Shares still owed to the redemption queue. */
+export function unclaimedShares(entries: ReadonlyArray<{shares: bigint; claimed: boolean}>): bigint {
+  return entries.reduce((sum, e) => (e.claimed ? sum : sum + e.shares), 0n);
+}
