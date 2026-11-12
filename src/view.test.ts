@@ -89,10 +89,19 @@ describe("ChainView", () => {
     expect(asked.slice(first)).toEqual([]); // the head has not moved: nothing new to ask
   });
 
-  it("stays a few blocks behind the head, where nothing is replaced any more", async () => {
-    const {view, asked} = chain();
-    await view.read();
-    expect(asked.map((a) => a.toBlock).reduce((x, y) => (x > y ? x : y))).toBe(245n); // the head is 250
+  it("sees a proposal posted in the head block, so it never posts the same step twice", async () => {
+    // The chain makes a block only when there is a transaction: the runner's
+    // own proposal can be the newest block for minutes.
+    LOGS.push({address: GOVERNOR, blockNumber: 250n, eventName: "ProposalPosted", args: {proposalId: id(4), assets: 0n, executableAt: 9999n}});
+    PROPOSALS[id(4)] = {assets: 0n, callData: encodeSell(TOKEN, 50n, floor), state: 1};
+    try {
+      const {view} = chain();
+      const fund = await view.read();
+      expect(fund.pending).toEqual({id: id(4), executableAt: 9999n, executable: true});
+    } finally {
+      LOGS.pop();
+      delete PROPOSALS[id(4)];
+    }
   });
 
   it("forgets its history when the chain no longer has what the logs showed, and reads it again", async () => {

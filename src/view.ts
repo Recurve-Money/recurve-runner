@@ -21,12 +21,6 @@ import {applyExit, currentFunding, newestPending, proposalKind, returnedSince, s
 
 const FINAL = new Set([2, 3, 5]); // Vetoed, Blocked, Settled: never change again
 
-/**
- * How far behind the head the log scan stays. What it reads is kept for the
- * life of the process, so it reads only blocks old enough not to be replaced.
- */
-const CONFIRMATIONS = 5n;
-
 export class ChainView {
   private history: ProposalRecord[] = [];
   /** Every `Liquidated` the strategy has emitted: what each `returnToVault` sent back. */
@@ -46,13 +40,16 @@ export class ChainView {
     const block = await publicClient.getBlock();
     const now = block.timestamp;
 
-    const settled = block.number > CONFIRMATIONS ? block.number - CONFIRMATIONS : 0n;
-    await this.extendHistory(settled);
+    // To the head: a proposal this runner posted last round has to be in the
+    // history this round, or it would post the same step again. Robinhood
+    // Chain makes a block only when there is a transaction, so "a few blocks
+    // behind" can mean minutes. A replaced block is caught below instead.
+    await this.extendHistory(block.number);
     await this.refreshStates();
 
     const [snap, queuedAssets, holdings] = await Promise.all([
       recurve.vault.snapshot(),
-      this.queuedAssets(settled),
+      this.queuedAssets(),
       this.holdings(),
     ]);
 
@@ -102,7 +99,8 @@ export class ChainView {
     this.queue.clear();
     this.requests = 0n;
     this.scannedTo = null;
-    this.abandoned.clear();
+    // `abandoned` stays: it is what this runner decided, not what the logs said,
+    // and a proposal walked away from at a stale price is never revived.
   }
 
   /**
@@ -224,8 +222,12 @@ export class ChainView {
    * late, an RPC that drops logs) and exits are waiting that the runner cannot
    * see: the round fails rather than trade as if they were not there.
    */
-  private async queuedAssets(at: bigint): Promise<bigint> {
+  private async queuedAssets(): Promise<bigint> {
     const {publicClient, cfg} = this.ctx;
+    // At the block the logs were read to, so the two counts describe the same
+    // chain. An RPC that has fallen behind that block cannot answer, and the
+    // round fails and is tried again, rather than seeing a shorter queue.
+    const at = this.scannedTo ?? cfg.deployBlock;
     const length = await publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "queueLength", blockNumber: at});
     if (length > this.requests) {
       throw new Error(
