@@ -30,6 +30,8 @@ export class ChainView {
   /** How many exits the logs have shown being queued, claimed or not. */
   private requests = 0n;
   private scannedTo: bigint | null = null;
+  /** The last head the scan reached, and its hash: the check that the chain read is still the chain. */
+  private checkpoint: {number: bigint; hash: Hex} | null = null;
   /** Proposals whose window closed with execute() reverting. Reported once, then skipped. */
   private abandoned = new Set<Hex>();
 
@@ -40,11 +42,24 @@ export class ChainView {
     const block = await publicClient.getBlock();
     const now = block.timestamp;
 
+    // Everything below is remembered from earlier rounds. If the block the last
+    // round ended on has been replaced, so may anything read before it: drop
+    // it all and read the history again.
+    if (this.checkpoint) {
+      const then = await publicClient.getBlock({blockNumber: this.checkpoint.number});
+      if (then.hash !== this.checkpoint.hash) {
+        this.ctx.log(`block ${this.checkpoint.number} is not the block this runner read: the chain was reorganised. Reading the history again from block ${this.ctx.cfg.deployBlock}.`);
+        this.forget();
+      }
+    }
+
     // To the head: a proposal this runner posted last round has to be in the
     // history this round, or it would post the same step again. Robinhood
     // Chain makes a block only when there is a transaction, so "a few blocks
-    // behind" can mean minutes. A replaced block is caught below instead.
+    // behind" can mean minutes. A replaced block is caught by the check above
+    // on the next round.
     await this.extendHistory(block.number);
+    if (this.scannedTo === block.number && block.hash) this.checkpoint = {number: block.number, hash: block.hash};
     await this.refreshStates();
 
     const [snap, queuedAssets, holdings] = await Promise.all([
@@ -99,8 +114,11 @@ export class ChainView {
     this.queue.clear();
     this.requests = 0n;
     this.scannedTo = null;
-    // `abandoned` stays: it is what this runner decided, not what the logs said,
-    // and a proposal walked away from at a stale price is never revived.
+    this.checkpoint = null;
+    // `abandoned` stays. It is what this runner decided, not what the logs said.
+    // A proposal's id is a hash of its calldata and its time, so the same id
+    // after a reorganisation is the same stale price, and still not revived; an
+    // id that never comes back is simply never seen again.
   }
 
   /**
@@ -248,7 +266,8 @@ export class ChainView {
     }
     const shares = waitingShares(this.queue);
     if (shares === 0n) return 0n;
-    return publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "previewRedeem", args: [shares]});
+    // The price at the same block as the count, so both describe one chain.
+    return publicClient.readContract({address: cfg.vault, abi: vaultQueueAbi, functionName: "previewRedeem", args: [shares], blockNumber: at});
   }
 
   private async holdings(): Promise<{base: bigint; leg: bigint}> {

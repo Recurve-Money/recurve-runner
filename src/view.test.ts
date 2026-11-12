@@ -40,9 +40,13 @@ const LOGS = [
 /** A chain whose log requests can be told to fail: `failing(call)` is asked before each one. */
 function chain(failing: (call: {address: string; fromBlock: bigint}) => boolean = () => false, queueLength = 2n) {
   const asked: {address: string; fromBlock: bigint; toBlock: bigint}[] = [];
+  /** Block hashes a test has replaced. */
+  const hashes = new Map<bigint, Hex>();
   const publicClient = {
-    getBlock: async (args?: {blockNumber: bigint}) =>
-      args ? {number: args.blockNumber, timestamp: 1000n + args.blockNumber} : {number: 250n, timestamp: 5000n},
+    getBlock: async (args?: {blockNumber: bigint}) => {
+      const number = args ? args.blockNumber : 250n;
+      return {number, timestamp: args ? 1000n + number : 5000n, hash: hashes.get(number) ?? (`0x${number.toString(16).padStart(64, "0")}` as Hex)};
+    },
     getLogs: async ({address, fromBlock, toBlock}: {address: string; fromBlock: bigint; toBlock: bigint}) => {
       asked.push({address, fromBlock, toBlock});
       if (failing({address, fromBlock})) throw new Error("the RPC did not answer");
@@ -66,7 +70,7 @@ function chain(failing: (call: {address: string; fromBlock: bigint}) => boolean 
     base: {address: BASE, decimals: 18, symbol: "BASE"},
     log: () => {},
   } as unknown as Context;
-  return {view: new ChainView(ctx), asked};
+  return {view: new ChainView(ctx), asked, hashes};
 }
 
 describe("ChainView", () => {
@@ -102,6 +106,17 @@ describe("ChainView", () => {
       LOGS.pop();
       delete PROPOSALS[id(4)];
     }
+  });
+
+  it("reads the history again when the block it last read has been replaced, and counts a return once", async () => {
+    const {view, asked, hashes} = chain();
+    await view.read();
+    hashes.set(250n, `0x${"ee".repeat(32)}` as Hex);
+    const before = asked.length;
+    const fund = await view.read();
+    expect(asked.slice(before).some((a) => a.fromBlock === 0n)).toBe(true); // from the deploy block again
+    expect(fund.returned).toBe(110n);
+    expect(fund.queuedAssets).toBe(6n);
   });
 
   it("forgets its history when the chain no longer has what the logs showed, and reads it again", async () => {
